@@ -3,10 +3,111 @@ DC 親子関係 最適化モデル (SPEC.md 準拠)
 
 目的: 週次コスト（在庫コスト + 輸送コスト）の最小化
 決定変数: x[j,k] = 1 ならば DC k を DC j の子として割り当てる
+コスト帰属: DC 間輸送コストは受け取り側（子 DC）に計上する
 """
 
 from __future__ import annotations
+import pandas as pd
 import pulp
+
+
+def _build_cost_rows(
+    dc_ids: list[str],
+    demand: dict,
+    holding: dict,
+    lot: dict,
+    tariff_a: dict,
+    tariff_b: dict,
+    parent_of: dict,
+    scenario: str,
+) -> list[dict]:
+    """SPEC 4.2「表示形式」の各行に対応するレコードを生成する。
+    倉庫別行の後に合計行（dc_id=None）を追加して返す。
+    """
+    rows: list[dict] = []
+    h_sum = st_sum = dt_sum = 0.0
+
+    for k in dc_ids:
+        parent = parent_of[k]
+        children = [c for c in dc_ids if parent_of.get(c) == k]
+
+        if parent is None:
+            h  = 7 * holding[k] * lot[k] / 2
+            st = tariff_a[k] * (demand[k] + sum(demand[c] for c in children))
+            dt = 0.0
+        else:
+            h  = 7 * holding[k] * demand[k] / 2
+            st = 0.0
+            dt = tariff_b[(parent, k)] * demand[k]
+
+        rows.append({
+            "scenario": scenario,
+            "dc_id": k,
+            "holding_cost": h,
+            "supplier_transport_cost": st,
+            "dc_transport_cost": dt,
+            "total": h + st + dt,
+        })
+        h_sum += h
+        st_sum += st
+        dt_sum += dt
+
+    rows.append({
+        "scenario": scenario,
+        "dc_id": None,
+        "holding_cost": h_sum,
+        "supplier_transport_cost": st_sum,
+        "dc_transport_cost": dt_sum,
+        "total": h_sum + st_sum + dt_sum,
+    })
+    return rows
+
+
+def _build_summary_df(
+    dc_ids: list[str],
+    demand: dict,
+    holding: dict,
+    lot: dict,
+    tariff_a: dict,
+    tariff_b: dict,
+    parent_of: dict,
+) -> pd.DataFrame:
+    """SPEC 4.2⑤ DC 別サマリー DataFrame を生成する。"""
+    rows = []
+    for k in dc_ids:
+        parent = parent_of[k]
+        children = [c for c in dc_ids if parent_of.get(c) == k]
+
+        if parent is not None:
+            role = "子"
+            h  = 7 * holding[k] * demand[k] / 2
+            st = 0.0
+            dt = tariff_b[(parent, k)] * demand[k]
+        elif children:
+            role = "親"
+            h  = 7 * holding[k] * lot[k] / 2
+            st = tariff_a[k] * (demand[k] + sum(demand[c] for c in children))
+            dt = 0.0
+        else:
+            role = "孤立"
+            h  = 7 * holding[k] * lot[k] / 2
+            st = tariff_a[k] * demand[k]
+            dt = 0.0
+
+        rows.append({
+            "dc_id": k,
+            "demand": demand[k],
+            "holding_cost_unit": holding[k],
+            "lot_size": lot[k],
+            "tariff_supplier": tariff_a[k],
+            "role": role,
+            "parent_dc": parent,
+            "holding_cost": h,
+            "supplier_transport_cost": st,
+            "dc_transport_cost": dt,
+            "total_cost": h + st + dt,
+        })
+    return pd.DataFrame(rows)
 
 
 def solve(dcs: list[dict], dc_tariffs: list[dict]) -> dict:
@@ -24,8 +125,17 @@ def solve(dcs: list[dict], dc_tariffs: list[dict]) -> dict:
     {
         "status": "Optimal" | "Infeasible" | str,
         "total_weekly_cost": float | None,
-        "parent_of": {dc_id: parent_dc_id | None}
-            None = 孤立 DC または 親 DC（親を持たない）
+        "parent_of": {dc_id: parent_dc_id | None},
+        "cost_breakdown": [
+            {"scenario": "baseline"|"optimized", "dc_id": str|None,
+             "holding_cost": float, "supplier_transport_cost": float,
+             "dc_transport_cost": float, "total": float},
+            ...  # 倉庫別行 + 合計行(dc_id=None) が baseline/optimized の順に並ぶ
+        ],
+        "summary": {
+            "baseline":  pd.DataFrame,  # 親子設定なし（全倉庫孤立）
+            "optimized": pd.DataFrame,  # 最適化後
+        }
     }
     """
     dc_ids = [dc["dc_id"] for dc in dcs]
@@ -55,7 +165,8 @@ def solve(dcs: list[dict], dc_tariffs: list[dict]) -> dict:
     # delta[j,k] = (子 DC k の在庫コスト削減) - (輸送コスト増加)
     #            = -7*h_k*(Q_k - d_k)/2  +  d_k*(a_j + b_jk - a_k)
     #
-    # delta が負 = 親子化するとコストが下がる
+    # コスト帰属（親 vs 子）に関わらず合計は同一なので、
+    # 目的関数はどちらの帰属でも変わらない。
 
     base_cost = sum(
         7 * holding[j] * lot[j] / 2 + tariff_a[j] * demand[j]
@@ -101,7 +212,12 @@ def solve(dcs: list[dict], dc_tariffs: list[dict]) -> dict:
 
     status = pulp.LpStatus[prob.status]
     if status != "Optimal":
-        return {"status": status, "total_weekly_cost": None, "parent_of": {}}
+        return {
+            "status": status,
+            "total_weekly_cost": None,
+            "parent_of": {},
+            "cost_breakdown": [],
+        }
 
     parent_of = {
         k: next(
@@ -111,8 +227,19 @@ def solve(dcs: list[dict], dc_tariffs: list[dict]) -> dict:
         for k in dc_ids
     }
 
+    baseline_parent = {k: None for k in dc_ids}
+    cost_breakdown = (
+        _build_cost_rows(dc_ids, demand, holding, lot, tariff_a, tariff_b, baseline_parent, "baseline")
+        + _build_cost_rows(dc_ids, demand, holding, lot, tariff_a, tariff_b, parent_of, "optimized")
+    )
+
     return {
         "status": "Optimal",
         "total_weekly_cost": pulp.value(prob.objective),
         "parent_of": parent_of,
+        "cost_breakdown": cost_breakdown,
+        "summary": {
+            "baseline":  _build_summary_df(dc_ids, demand, holding, lot, tariff_a, tariff_b, baseline_parent),
+            "optimized": _build_summary_df(dc_ids, demand, holding, lot, tariff_a, tariff_b, parent_of),
+        },
     }
