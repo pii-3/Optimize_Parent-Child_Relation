@@ -134,6 +134,7 @@ $$
 | `holding_cost` | float | 在庫保管単価 $h_j$ | 円/ケース/日 |
 | `lot_size` | float | ロットサイズ $Q_j$ | ケース |
 | `tariff_from_supplier` | float | タリフ A $a_j$ | 円/ケース |
+| `current_parent_dc_id` | str \| None | 現状の親 DC の ID。親を持たない DC は空欄。列自体が省略された場合は `"current"` シナリオを出力しない | — |
 
 **② DC 間タリフ**（DC ペアごとの 1 レコード、非対称）
 
@@ -153,6 +154,7 @@ $$
 | `total_weekly_cost` | float | 最適化後の週次コスト合計（円/週） |
 | `parent_of` | dict | 各 DC の親 DC（下表参照） |
 | `cost_breakdown` | dict | コスト内訳（下表参照） |
+| `current_weekly_cost` | float \| None | 現状の親子設定での週次コスト合計。`current_parent_of` を渡した場合のみ設定、それ以外は `None` |
 
 **② `parent_of`**（DC ごとの 1 レコード）
 
@@ -164,11 +166,11 @@ $$
 **③ `cost_breakdown`**（行のリスト）
 
 `cost_breakdown` は表の各行に対応するレコードのリスト。
-`"baseline"`（全倉庫孤立）の倉庫別行＋合計行、続いて `"optimized"`（最適化後）の倉庫別行＋合計行の順に並ぶ。
+`"baseline"`（全倉庫孤立）の倉庫別行＋合計行、`"current_parent_of"` を渡した場合は続いて `"current"`（現状設定）の倉庫別行＋合計行、最後に `"optimized"`（最適化後）の倉庫別行＋合計行の順に並ぶ。
 
 | フィールド | 型 | 説明 | 単位 |
 |-----------|---|------|------|
-| `scenario` | str | `"baseline"` = 全倉庫孤立 / `"optimized"` = 最適化後 | — |
+| `scenario` | str | `"baseline"` = 全倉庫孤立 / `"current"` = 現状設定 / `"optimized"` = 最適化後 | — |
 | `dc_id` | str \| None | 倉庫 ID。合計行は `None` | — |
 | `holding_cost` | float | 在庫コスト | 円/週 |
 | `supplier_transport_cost` | float | 仕入れ先→DC 輸送コスト（孤立・親 DC のみ） | 円/週 |
@@ -178,13 +180,16 @@ $$
 *表示形式*（縦: 倉庫、横: コスト区分）
 
 `cost_breakdown` は縦に倉庫・横にコスト区分の表として出力される。
-`baseline`（全孤立）と `optimized`（最適化後）を上下に並べて比較できる。
+`baseline`（全孤立）、`current`（現状設定、省略可）、`optimized`（最適化後）を上から順に並べて比較できる。
 
 | シナリオ | 倉庫 | 在庫コスト | 仕入れ先→DC 輸送 | DC 間輸送 | 合計 |
 |---------|------|----------:|----------------:|----------:|-----:|
 | ベースライン（全孤立） | DC-A | x,xxx | x,xxx | 0 | x,xxx |
 | | DC-B | x,xxx | x,xxx | 0 | x,xxx |
 | | 【合計】 | **x,xxx** | **x,xxx** | **0** | **x,xxx** |
+| 現状設定 | DC-A | x,xxx | x,xxx | 0 | x,xxx |
+| | DC-B | x,xxx | 0 | x,xxx | x,xxx |
+| | 【合計】 | **x,xxx** | **x,xxx** | **x,xxx** | **x,xxx** |
 | 最適化後 | DC-A | x,xxx | x,xxx | 0 | x,xxx |
 | | DC-B | x,xxx | 0 | x,xxx | x,xxx |
 | | 【合計】 | **x,xxx** | **x,xxx** | **x,xxx** | **x,xxx** |
@@ -219,6 +224,7 @@ $$
 | `total_cost` | float | 週次コスト合計 | 円/週 |
 
 `baseline` では全 DC の `role = "孤立"`、`parent_dc = None` となる。
+`current_parent_of` を渡した場合は `"current"` キーにも同形式の DataFrame を格納する。
 
 *表示形式*（シナリオ 1 の例）
 

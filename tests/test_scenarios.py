@@ -83,3 +83,61 @@ def test_scenario3_dc_c_as_hub_is_optimal():
     assert result["parent_of"]["DC-A"] == "DC-C"  # DC-A は DC-C の子
     assert result["parent_of"]["DC-B"] == "DC-C"  # DC-B は DC-C の子
     assert result["parent_of"]["DC-C"] is None     # DC-C は親（親を持たない）
+
+
+# ---------------------------------------------------------------------------
+# シナリオ 4: 現状設定のコスト計算（current_parent_of の動作確認）
+#
+# シナリオ 1 のデータで「現状は DC-A が DC-B の子」という設定を渡し、
+# cost_breakdown に "current" シナリオが追加されることを確認する。
+# ---------------------------------------------------------------------------
+def test_current_parent_of_adds_current_scenario():
+    dcs = [
+        {"dc_id": "DC-A", "demand": 50, "holding_cost": 10, "lot_size": 500, "tariff_from_supplier": 5},
+        {"dc_id": "DC-B", "demand": 50, "holding_cost": 10, "lot_size": 500, "tariff_from_supplier": 15},
+    ]
+    dc_tariffs = [
+        {"from_dc_id": "DC-A", "to_dc_id": "DC-B", "tariff": 3},
+        {"from_dc_id": "DC-B", "to_dc_id": "DC-A", "tariff": 3},
+    ]
+    # 現状: DC-A が DC-B の子（SPEC シナリオ 1 の第 3 行、合計 20,900 のパターン）
+    current = {"DC-A": "DC-B", "DC-B": None}
+
+    result = solve(dcs, dc_tariffs, current_parent_of=current)
+
+    assert result["status"] == "Optimal"
+
+    scenarios = [r["scenario"] for r in result["cost_breakdown"]]
+    assert "current" in scenarios
+
+    # 現状設定コストの合計行
+    current_total_row = next(
+        r for r in result["cost_breakdown"]
+        if r["scenario"] == "current" and r["dc_id"] is None
+    )
+    # DC-A(子): 在庫=1750, DC間輸送=150 / DC-B(親): 在庫=17500, 仕入れ先輸送=1500
+    assert current_total_row["total"] == pytest.approx(20_900.0)
+    assert result["current_weekly_cost"] == pytest.approx(20_900.0)
+
+    # summary にも "current" キーが存在する
+    assert "current" in result["summary"]
+    assert len(result["summary"]["current"]) == 2
+
+
+def test_current_parent_of_omitted_no_current_scenario():
+    """current_parent_of を渡さない場合は "current" シナリオが存在しない。"""
+    dcs = [
+        {"dc_id": "DC-A", "demand": 50, "holding_cost": 10, "lot_size": 500, "tariff_from_supplier": 5},
+        {"dc_id": "DC-B", "demand": 50, "holding_cost": 10, "lot_size": 500, "tariff_from_supplier": 15},
+    ]
+    dc_tariffs = [
+        {"from_dc_id": "DC-A", "to_dc_id": "DC-B", "tariff": 3},
+        {"from_dc_id": "DC-B", "to_dc_id": "DC-A", "tariff": 3},
+    ]
+
+    result = solve(dcs, dc_tariffs)
+
+    scenarios = {r["scenario"] for r in result["cost_breakdown"]}
+    assert "current" not in scenarios
+    assert result["current_weekly_cost"] is None
+    assert "current" not in result["summary"]

@@ -110,7 +110,11 @@ def _build_summary_df(
     return pd.DataFrame(rows)
 
 
-def solve(dcs: list[dict], dc_tariffs: list[dict]) -> dict:
+def solve(
+    dcs: list[dict],
+    dc_tariffs: list[dict],
+    current_parent_of: dict | None = None,
+) -> dict:
     """
     Parameters
     ----------
@@ -119,21 +123,26 @@ def solve(dcs: list[dict], dc_tariffs: list[dict]) -> dict:
           "lot_size": float, "tariff_from_supplier": float}, ...]
     dc_tariffs : DC 間タリフ（非対称・全ペア必須）
         [{"from_dc_id": str, "to_dc_id": str, "tariff": float}, ...]
+    current_parent_of : 現状の親子設定（省略可）
+        {dc_id: parent_dc_id | None}
+        渡した場合は "current" シナリオを cost_breakdown / summary に追加する。
 
     Returns
     -------
     {
         "status": "Optimal" | "Infeasible" | str,
         "total_weekly_cost": float | None,
+        "current_weekly_cost": float | None,  # current_parent_of を渡した場合のみ
         "parent_of": {dc_id: parent_dc_id | None},
         "cost_breakdown": [
-            {"scenario": "baseline"|"optimized", "dc_id": str|None,
+            {"scenario": "baseline"|"current"|"optimized", "dc_id": str|None,
              "holding_cost": float, "supplier_transport_cost": float,
              "dc_transport_cost": float, "total": float},
-            ...  # 倉庫別行 + 合計行(dc_id=None) が baseline/optimized の順に並ぶ
+            ...  # 倉庫別行 + 合計行(dc_id=None) が baseline[/current]/optimized の順に並ぶ
         ],
         "summary": {
             "baseline":  pd.DataFrame,  # 親子設定なし（全倉庫孤立）
+            "current":   pd.DataFrame,  # 現状設定（current_parent_of を渡した場合のみ）
             "optimized": pd.DataFrame,  # 最適化後
         }
     }
@@ -228,18 +237,36 @@ def solve(dcs: list[dict], dc_tariffs: list[dict]) -> dict:
     }
 
     baseline_parent = {k: None for k in dc_ids}
-    cost_breakdown = (
-        _build_cost_rows(dc_ids, demand, holding, lot, tariff_a, tariff_b, baseline_parent, "baseline")
-        + _build_cost_rows(dc_ids, demand, holding, lot, tariff_a, tariff_b, parent_of, "optimized")
+    cost_breakdown = _build_cost_rows(
+        dc_ids, demand, holding, lot, tariff_a, tariff_b, baseline_parent, "baseline"
     )
+
+    current_weekly_cost = None
+    if current_parent_of is not None:
+        current_rows = _build_cost_rows(
+            dc_ids, demand, holding, lot, tariff_a, tariff_b, current_parent_of, "current"
+        )
+        cost_breakdown += current_rows
+        current_weekly_cost = next(r["total"] for r in current_rows if r["dc_id"] is None)
+
+    cost_breakdown += _build_cost_rows(
+        dc_ids, demand, holding, lot, tariff_a, tariff_b, parent_of, "optimized"
+    )
+
+    summary = {
+        "baseline":  _build_summary_df(dc_ids, demand, holding, lot, tariff_a, tariff_b, baseline_parent),
+        "optimized": _build_summary_df(dc_ids, demand, holding, lot, tariff_a, tariff_b, parent_of),
+    }
+    if current_parent_of is not None:
+        summary["current"] = _build_summary_df(
+            dc_ids, demand, holding, lot, tariff_a, tariff_b, current_parent_of
+        )
 
     return {
         "status": "Optimal",
         "total_weekly_cost": pulp.value(prob.objective),
+        "current_weekly_cost": current_weekly_cost,
         "parent_of": parent_of,
         "cost_breakdown": cost_breakdown,
-        "summary": {
-            "baseline":  _build_summary_df(dc_ids, demand, holding, lot, tariff_a, tariff_b, baseline_parent),
-            "optimized": _build_summary_df(dc_ids, demand, holding, lot, tariff_a, tariff_b, parent_of),
-        },
+        "summary": summary,
     }
